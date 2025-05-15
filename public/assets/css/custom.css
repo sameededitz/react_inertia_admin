@@ -1,0 +1,6 @@
+.form-select {
+    background-size: 38px 14px !important;
+}
+[data-theme="dark"] .form-select {
+    background-size: 38px 14px !important;
+}
