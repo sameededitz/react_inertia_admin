@@ -5,6 +5,7 @@ import ApexCharts from 'apexcharts'
 import { useEffect, useRef, useState } from 'react';
 import { Icon } from '@iconify/react/dist/iconify.js';
 import axios from 'axios';
+import { useEcho } from '@laravel/echo-react';
 
 function ManageVpsServer({ vpsServer }) {
     const cpuChart = useRef(null);
@@ -18,11 +19,62 @@ function ManageVpsServer({ vpsServer }) {
 
     const [output, setOutput] = useState('');
     const [isRunning, setIsRunning] = useState(false);
-    const [intervalId, setIntervalId] = useState(null);
     const outputRef = useRef(null);
+
+    const [command, setCommand] = useState('');
+    const [terminalHistory, setTerminalHistory] = useState([]); // [{cmd, output}]
+    const [commandError, setCommandError] = useState('');
+    const [commandLoading, setCommandLoading] = useState(false);
+    const terminalRef = useRef(null);
+    const [currentOutput, setCurrentOutput] = useState(''); // output for current running cmd
+    const [currentCommandIndex, setCurrentCommandIndex] = useState(null);
 
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
+
+    const [shouldListen, setShouldListen] = useState(false);
+
+    const [terminalShouldListen, setTerminalShouldListen] = useState(false);
+
+    const { leaveChannel, leave, stopListening, listen } = useEcho('server.' + vpsServer.id, 'ScriptOutputBroadcasted', (e) => {
+        if (e.output) {
+            setOutput(prev => prev + e.output);
+            if (e.output.includes('All done. Scripts executed and cleaned up.')) {
+                setIsRunning(false);
+                leaveChannel();
+                stopListening();
+                leave();
+                setShouldListen(false);
+            }
+        }
+    }, [shouldListen]);
+
+    const { leaveChannel: leaveTerminalChannel, leave: leaveTerminal, stopListening: stopListeningTerminal, listen: listenTerminal } = useEcho('terminal.' + vpsServer.id, 'CommandOutput', (e) => {
+        if (e.output) {
+            if (e.output.includes('executed')) {
+                leaveTerminalChannel();
+                stopListeningTerminal();
+                leaveTerminal();
+                setTerminalShouldListen(false);
+                setCommandLoading(false);
+                setCurrentCommandIndex(null);
+                return;
+            }
+            setCurrentOutput(prev => prev + e.output);
+
+            // Update the latest terminalHistory entry's output live
+            setTerminalHistory(prev => {
+                const updated = [...prev];
+                if (currentCommandIndex !== null) {
+                    updated[currentCommandIndex] = {
+                        ...updated[currentCommandIndex],
+                        output: prev[currentCommandIndex].output + e.output,
+                    };
+                }
+                return updated;
+            });
+        }
+    }, [terminalShouldListen]);
 
     const fetchStats = () => {
         setLoading(true);
@@ -80,29 +132,8 @@ function ManageVpsServer({ vpsServer }) {
         try {
             const response = await axios.post(route('vps-server.run-script', vpsServer.id));
             if (response.data.status === 'started') {
-                // Start polling
-                const id = setInterval(async () => {
-                    try {
-                        const res = await axios.post(route('vps-server.output', vpsServer.id));
-                        const data = res.data;
-
-                        if (data !== undefined) {
-                            setOutput(prev => prev + data);
-                            // Detect end marker in output
-                            if (data.includes('All done. Scripts executed and cleaned up.')) {
-                                clearInterval(id);
-                                setIsRunning(false);
-                            }
-                        }
-                    } catch (err) {
-                        console.error('❌ Error fetching script output:', err);
-                        setOutput(prev => prev + `\n❌ Error fetching output: ${err.message}`);
-                        clearInterval(id);
-                        setIsRunning(false);
-                    }
-                }, 1000);
-
-                setIntervalId(id);
+                setOutput('✅ Script started successfully. Listening for output...\n');
+                setShouldListen(true);
             } else {
                 setOutput('⚠️ Failed to start script.');
                 setIsRunning(false);
@@ -113,6 +144,36 @@ function ManageVpsServer({ vpsServer }) {
             setIsRunning(false);
         }
     };
+
+    const sendCommand = async (e) => {
+        e.preventDefault();
+        if (command.trim() === '') return;
+
+        setCommandLoading(true);
+        setCommandError('');
+        setTerminalHistory(prev => [...prev, { cmd: command, output: ''}]);
+        setCurrentCommandIndex(terminalHistory.length); // track index to update live
+        setCurrentOutput('');
+        setCommand('');
+
+        // 2. Enable Echo listening
+        setTerminalShouldListen(true);
+
+        try {
+            const response = await axios.post(route('vps-server.command', vpsServer.id), { command });
+        } catch (error) {
+            console.error('❌ Error sending command:', error);
+            setTerminalHistory(prev => {
+                const newHistory = [...prev];
+                newHistory[newHistory.length - 1].output = '❌ Error sending command: ' + error.message;
+                return newHistory;
+            });
+            setCommandLoading(false);
+            setTerminalShouldListen(false);
+        } finally {
+            setCommandLoading(false);
+        }
+    }
 
     useEffect(() => {
         // Initialize charts
@@ -128,11 +189,8 @@ function ManageVpsServer({ vpsServer }) {
             cpuChart.current && cpuChart.current.destroy();
             ramChart.current && ramChart.current.destroy();
             diskChart.current && diskChart.current.destroy();
-            if (intervalId) {
-                clearInterval(intervalId);
-            }
         };
-    }, [vpsServer.id, intervalId]);
+    }, [vpsServer.id]);
 
     useEffect(() => {
         if (outputRef.current) {
@@ -142,6 +200,12 @@ function ManageVpsServer({ vpsServer }) {
             });
         }
     }, [output]);
+
+    useEffect(() => {
+        if (terminalRef.current) {
+            terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+        }
+    }, [terminalHistory]);
 
     return (
         <Main>
@@ -250,6 +314,60 @@ function ManageVpsServer({ vpsServer }) {
                     </div>
                 </div>
             </div>
+
+            <div className="card mt-4">
+                <div className="card-header">
+                    <h6 className='mb-0'>SSH Terminal</h6>
+                    {commandError && <div className="text-danger">{commandError}</div>}
+                    {commandLoading && <div className="text-warning">Running command...</div>}
+                </div>
+                <div className="card-body p-0">
+                    <pre
+                        ref={terminalRef}
+                        className="mb-0"
+                        style={{
+                            height: '300px',
+                            overflowY: 'auto',
+                            padding: '1rem',
+                            fontFamily: "'Courier New', monospace",
+                            fontSize: '14px',
+                            backgroundColor: '#1e1e1e',
+                            color: '#00ff00',
+                            whiteSpace: 'pre-wrap',
+                        }}
+                    >
+                        {terminalHistory.map((item, index) => (
+                            <div key={index}>
+                                <div><strong>$ {item.cmd}</strong></div>
+                                <div>{item.output}</div>
+                            </div>
+                        ))}
+                    </pre>
+                </div>
+                <div className="card-footer">
+                    <form
+                        onSubmit={sendCommand}
+                        className="d-flex gap-2"
+                    >
+                        <input
+                            type="text"
+                            className="form-control"
+                            placeholder="Enter command..."
+                            value={command}
+                            onChange={(e) => setCommand(e.target.value)}
+                            disabled={commandLoading}
+                        />
+                        <button
+                            className="btn btn-outline-primary"
+                            type="submit"
+                            disabled={commandLoading || command.trim() === ''}
+                        >
+                            Run
+                        </button>
+                    </form>
+                </div>
+            </div>
+
 
         </Main >
     )

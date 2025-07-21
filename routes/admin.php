@@ -1,8 +1,9 @@
 <?php
 
+use App\Events\CommandOutput;
+use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Admin\DashboardController;
 use App\Http\Controllers\Admin\VpsServerController;
-use Illuminate\Support\Facades\Route;
 
 Route::middleware('auth')->group(function () {
     Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
@@ -18,6 +19,10 @@ Route::middleware('auth')->group(function () {
     Route::get('/vps-server/{vpsServer}/stats', [VpsServerController::class, 'stats'])->name('vps-server.stats');
     Route::get('/vps-server/{vpsServer}/connected-users', [VpsServerController::class, 'connectedUsers'])->name('vps-server.connected-users');
     Route::post('/vps-server/{vpsServer}/run-script', [VpsServerController::class, 'runScript'])->name('vps-server.run-script');
-    Route::post('/vps-server/{vpsServer}/output', [VpsServerController::class, 'output'])->name('vps-server.output');
+    Route::post('/vps-server/{vpsServer}/command', [VpsServerController::class, 'runCommand'])->name('vps-server.command');
 
+    Route::get('/test', function () {
+        broadcast(new CommandOutput('Test output', 1));
+        return response()->json(['message' => 'Broadcasted successfully']);
+    })->name('test');
 });

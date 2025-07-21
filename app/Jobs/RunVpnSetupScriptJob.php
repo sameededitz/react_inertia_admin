@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Events\ScriptOutputBroadcasted;
 use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
 use App\Models\VpsServer;
@@ -36,7 +37,7 @@ class RunVpnSetupScriptJob implements ShouldQueue
         try {
             $this->log("Started at: " . now() . "\n\n");
 
-            $this->log("Connecting to server {$this->server->ip_address}...");
+            $this->log("Connecting to server {$this->server->ip_address}..."."\n\n");
 
             $script = $this->getScript('setup-vpn.sh', [
                 '{{VPN_DOMAIN}}' => $this->server->domain,
@@ -137,6 +138,8 @@ class RunVpnSetupScriptJob implements ShouldQueue
     {
         $path = "vpn-output/{$this->server->id}.log";
         Storage::append($path, trim($text));
+
+        ScriptOutputBroadcasted::dispatch($text, $this->server->id);
     }
 
     private function connectToServer()

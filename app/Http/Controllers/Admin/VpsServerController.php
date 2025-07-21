@@ -6,6 +6,7 @@ use Inertia\Inertia;
 use phpseclib3\Net\SSH2;
 use App\Models\VpsServer;
 use Illuminate\Http\Request;
+use App\Events\CommandOutput;
 use App\Jobs\RunVpnSetupScriptJob;
 use Illuminate\Support\Facades\Log;
 use App\Http\Controllers\Controller;
@@ -197,14 +198,30 @@ class VpsServerController extends Controller
         return response()->json(['status' => 'started']);
     }
 
-    public function output(VpsServer $vpsServer)
+    public function runCommand(Request $request, VpsServer $vpsServer)
     {
-        $logPath = "vpn-output/{$vpsServer->id}.log";
-        if (!Storage::exists($logPath)) {
-            return response()->json(['message' => 'Log file not found'], 404);
+        $request->validate([
+            'command' => 'required|string',
+        ]);
+
+        $ssh = $this->connectToServer($vpsServer);
+
+        if (!$ssh) {
+            return response()->json(['error' => 'Unable to connect to server'], 500);
         }
 
-        return response(Storage::get($logPath));
+        try {
+            $command = trim($request->command);
+
+            $ssh->exec($command, function ($str) use ($vpsServer){
+                $this->output($str, $vpsServer->id);
+            });
+            $this->output("executed", $vpsServer->id);
+            return response()->json(['message' => 'executed']);
+        } catch (\Exception $e) {
+            Log::channel('ssh')->error("Error executing command on {$vpsServer->ip_address} server: " . $e->getMessage());
+            return response()->json(['error' => 'Command execution failed'], 500);
+        }
     }
 
     private function connectToServer(VpsServer $vpsServer)
@@ -238,5 +255,10 @@ class VpsServerController extends Controller
             Log::channel('ssh')->error("Error fetching IKEv2 status: " . $e->getMessage());
             return 'Error';
         }
+    }
+
+    private function output($text, $serverId)
+    {
+        CommandOutput::dispatch($text, $serverId);
     }
 }
